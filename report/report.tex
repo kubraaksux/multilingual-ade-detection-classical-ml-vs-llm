@@ -1,0 +1,414 @@
+%%
+%% Advanced NLP Exercise 2.1 - Course Report
+%% Based on ACM sigconf template
+%%
+\documentclass[sigconf]{acmart}
+
+\usepackage{booktabs}
+
+%% Remove ACM-specific metadata for course report
+\settopmatter{printacmref=false}
+\renewcommand\footnotetextcopyrightpermission[1]{}
+\pagestyle{plain}
+\setcopyright{none}
+\acmConference{}{}{}
+\acmBooktitle{}
+\raggedbottom
+
+%% Figure path - on Overleaf put PNGs in a figures/ folder
+\graphicspath{{figures/}}
+
+\bibliographystyle{ACM-Reference-Format}
+
+\begin{document}
+
+\title{Multilingual ADE Detection and Classical ML vs.\ LLM Comparison}
+
+\author{Hatice Kübra Aksu}
+\affiliation{%
+  \institution{Technische Universit\"at Berlin}
+  \city{Berlin}
+  \country{Germany}
+}
+
+\begin{abstract}
+This report covers two tasks.
+In Task~1 I fine-tune XLM-RoBERTa-base for adverse drug event detection on German and English social media data from SMM4H~2026, then test zero-shot transfer to Russian.
+I compare monolingual, multilingual, and machine-translation--augmented setups.
+In Task~2 I compare a Random Forest with DistilBERT (on textified features) and Flan-T5 few-shot prompting on the Iris dataset.
+Main takeaways: multilingual pretraining enables decent cross-lingual transfer even across scripts, but dataset size matters a lot.
+On tabular data, classical ML wins easily.
+\end{abstract}
+
+\maketitle
+\pagestyle{plain}  % ACM class resets pagestyle in \maketitle; re-apply here
+
+%% ============================================================
+\section{Introduction}
+\label{sec:intro}
+
+Multilingual pretrained models like XLM-RoBERTa~\cite{conneau2020xlmr} can share learned representations across languages.
+This is useful in the medical domain where labelled data is scarce for most languages.
+Detecting adverse drug events (ADEs) in social media is a well-studied problem from the SMM4H shared task series~\cite{klein2025smm4h}.
+
+The idea behind cross-lingual transfer is straightforward: if a model learns what an adverse reaction looks like in English, it should be able to recognize one in German or Russian too, even without training data in those languages.
+XLM-RoBERTa was pretrained on 100 languages using CommonCrawl data, so it has seen all three scripts we work with here.
+The question is how much of that actually carries over to a specific downstream task like ADE detection.
+
+In Task~1 (Section~\ref{sec:task1}) I train ADE classifiers on German and English, then test zero-shot on Russian, which uses Cyrillic script and makes this a real cross-script challenge.
+I also try machine-translating English training data to Russian to see if that helps.
+
+In Task~2 (Section~\ref{sec:task2}) I take a different angle: comparing classical ML against transformers and LLMs on the Iris dataset~\cite{fisher1936iris}, after converting numerical features to text.
+The point is to check whether language models can handle structured, numerical data or whether classical approaches are still the better tool for that.
+
+
+%% ============================================================
+\section{Task 1: Multilingual ADE Detection}
+\label{sec:task1}
+
+\subsection{Data Preparation (Task 1.1)}
+\label{sec:task1-data}
+
+I use the SMM4H~2026 Task~1 dataset.
+It has social media posts labelled for adverse drug events (binary: ADE or not).
+The sources are quite different: German posts come from lifeline.de (a health forum), English from Twitter, and Russian from the RuDReC drug review corpus.
+
+I picked three languages: German (DE) and English (EN) for training, Russian (RU) for zero-shot evaluation.
+This gives a nice setup: two training languages with Latin script, and a test language with Cyrillic script that the model never sees during training.
+
+The provided dev sets become my test sets.
+I split off 15\% from each training set (stratified) as validation.
+Table~\ref{tab:task1-splits} shows the sizes.
+
+\begin{table}[t]
+\centering
+\caption{Dataset sizes. RU is test-only (zero-shot).}
+\label{tab:task1-splits}
+\small
+\begin{tabular}{llrrr}
+\toprule
+\textbf{Lang} & \textbf{Split} & \textbf{Total} & \textbf{Pos} & \textbf{Pos\%} \\
+\midrule
+DE & train & 1{,}070 & 60  & 5.6  \\
+DE & val   & 189    & 11  & 5.8  \\
+DE & test  & 1{,}259 & 70  & 5.6  \\
+\midrule
+EN & train & 15{,}553 & 1{,}666 & 10.7 \\
+EN & val   & 2{,}745  & 294   & 10.7 \\
+EN & test  & 444     & 61    & 13.7 \\
+\midrule
+RU & test  & 3{,}783  & 544   & 14.4 \\
+\midrule
+\multicolumn{2}{l}{EN$\to$RU translated} & 500 & 100 & 20.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The class imbalance is significant.
+Only 5.6\% of German training samples are positive.
+English is better at 10.7\% but still heavily skewed.
+This matters a lot later because the German monolingual model essentially can't learn from 60 positive examples.
+
+For Task~1.3.3 I translated 500 English samples to Russian using Google Translate.
+I oversampled positives to 20\% in the translated set (100 out of 500) to offset the class imbalance a bit.
+The idea was that giving the model more positive examples in the target language might improve recall.
+
+\subsection{Exploratory Analysis (Task 1.2)}
+\label{sec:task1-eda}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{label_distribution.png}
+\caption{Label distribution. All three languages are dominated by the negative class.}
+\label{fig:label-dist}
+\end{figure}
+
+Figure~\ref{fig:label-dist} shows the label distribution.
+German is the worst at $\sim$5.6\% positive.
+English and Russian sit around 10--14\%.
+The imbalance is a challenge for all models, but especially for German where the positive class is barely represented.
+
+Text lengths vary a lot across languages, which reflects the different platforms each corpus comes from.
+German forum posts tend to be long, often spanning multiple paragraphs where people describe symptoms in detail and mention several medications and side effects.
+English tweets are short (Twitter character limit).
+Russian reviews are somewhere in between: more detailed than tweets, but more focused than open-ended forum discussions.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{token_length_distribution.png}
+\caption{Token counts (XLM-RoBERTa tokenizer). Red line = 128-token limit. Most EN and RU texts fit; some DE posts get truncated.}
+\label{fig:token-dist}
+\end{figure*}
+
+Figure~\ref{fig:token-dist} shows token lengths after XLM-RoBERTa tokenization.
+English and Russian mostly stay under 128 tokens, but some German posts go well beyond that and get cut off.
+I kept the 128 limit anyway to save training time, which probably hurts German performance.
+
+I also looked at word frequencies.
+Each language has its own medical vocabulary (drug names, symptoms, body parts), and there's almost no surface-level overlap between them.
+German uses words like ``Nebenwirkungen'' (side effects) and ``Kopfschmerzen'' (headache), which look nothing like their English counterparts.
+Russian is even further away because of the Cyrillic script.
+So XLM-RoBERTa has to do all the heavy lifting, mapping words that look completely different into similar internal representations just because they mean the same thing.
+
+I also manually inspected a sample of the EN$\to$RU translations.
+Common drug names like ``ibuprofen'' or ``metformin'' survive translation fine, but informal descriptions of side effects often come out stilted or overly literal.
+For example, English tweets that say things like ``this med makes me so dizzy'' get translated into grammatically correct but unnatural-sounding Russian that doesn't match how native speakers would describe the same symptom.
+A few translations also dropped or altered negations, which could flip the meaning entirely.
+
+\subsection{Model Training (Task 1.3)}
+\label{sec:task1-training}
+
+All experiments use \texttt{xlm-roberta-base} with the same hyperparameters: learning rate $2 \times 10^{-5}$, batch size~16, 5~epochs, max length~128, AdamW with linear warmup (10\%), and weighted cross-entropy for the class imbalance.
+I keep the best checkpoint by validation macro-F1.
+The class weights are computed using sklearn's \texttt{compute\_class\_weight("balanced")}.
+
+\subsubsection{Monolingual Models (Task 1.3.1)}
+
+Two monolingual models:
+\begin{itemize}
+\item \textbf{Mono-DE}: Trained on German only.
+1{,}070 samples with just 60 positives.
+The model couldn't learn the minority class at all and just predicts everything as negative.
+Macro-F1 = 0.486, which is basically the negative-class F1 averaged with zero.
+Not useful, but not surprising either with this little data.
+Even with weighted loss, 60 positive examples aren't enough for a 278M-parameter transformer to learn anything meaningful.
+\item \textbf{Mono-EN}: Trained on English only.
+15{,}553 samples is enough to learn well.
+Macro-F1 = 0.869 on English test, with 0.704 precision and 0.820 recall on the positive class.
+\end{itemize}
+
+\subsubsection{Multilingual Model (Task 1.3.2)}
+
+I combined DE and EN training data into one model (16{,}623 training samples total).
+Results are in Table~\ref{tab:task1-results}.
+The interesting part: it reaches 0.689 macro-F1 on Russian without ever seeing a single Russian training sample.
+XLM-RoBERTa's cross-lingual representations actually work across the Latin--Cyrillic boundary.
+
+On the other hand, the multilingual model does slightly worse on English compared to the English-only model (0.796 vs.\ 0.869).
+This trade-off makes sense: the model now has to handle two languages at once.
+The small, noisy German data drags the model away from the optimal English performance.
+
+\subsubsection{Translation-Based Transfer (Task 1.3.3)}
+
+Three ways to evaluate on Russian:
+\begin{enumerate}
+\item[(a)] English-only model $\to$ Russian test (zero-shot)
+\item[(b)] Multilingual DE+EN model $\to$ Russian test (zero-shot)
+\item[(c)] Model trained on 500 machine-translated EN$\to$RU samples $\to$ Russian test
+\end{enumerate}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{task133_ru_comparison.png}
+\caption{Task 1.3.3: macro-F1 on Russian. EN-only wins; translation doesn't help.}
+\label{fig:task133}
+\end{figure}
+
+Figure~\ref{fig:task133} shows the comparison.
+The English-only model does best (roughly 0.70 macro-F1), slightly beating the multilingual model (0.689).
+The translated model is worst at 0.671.
+
+500 translated samples just can't compete with a model trained on 15{,}553 English samples.
+The EN-only model has seen far more diverse ADE examples, and XLM-RoBERTa's cross-lingual alignment transfers that knowledge to Russian even without explicit Russian data.
+Machine translation also adds noise. Medical terms don't always translate cleanly, and informal tweet language tends to produce awkward translations.
+
+\subsection{Evaluation and Error Analysis (Task 1.4)}
+\label{sec:task1-eval}
+
+\begin{table}[t]
+\centering
+\caption{All Task~1 results. Precision and recall are for the positive (ADE) class.}
+\label{tab:task1-results}
+\small
+\begin{tabular}{llcccc}
+\toprule
+\textbf{Model} & \textbf{Test} & \textbf{M-F1} & \textbf{Prec} & \textbf{Rec} & \textbf{AUC} \\
+\midrule
+Mono DE       & DE & .486 & .000 & .000 & .280 \\
+Mono EN       & EN & .869 & .704 & .820 & .976 \\
+\midrule
+Multi DE+EN   & DE & .603 & .267 & .229 & .819 \\
+Multi DE+EN   & EN & .796 & .550 & .721 & .961 \\
+Multi DE+EN   & RU & .689 & .465 & .415 & .830 \\
+\midrule
+EN-only (a)   & RU & .700 & .541 & .390 & .839 \\
+Multi (b)     & RU & .689 & .465 & .415 & .830 \\
+Translated (c)& RU & .671 & .357 & .522 & .789 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:task1-results} has all the numbers.
+Here's what I found:
+
+\textbf{German mono model} fails completely: zero precision, zero recall on positives.
+60 positive samples just isn't enough for a transformer to learn from.
+The model just predicts everything as negative, which gives 94.5\% accuracy (because the data is 94.4\% negative) but doesn't help with the actual task.
+
+\textbf{Multilingual training helps German}, jumping from 0.486 to 0.603.
+The English data teaches the model what ADEs look like, and that transfers to German through XLM-RoBERTa's shared representations.
+Still not great (only 22.9\% recall), but the model at least starts detecting some positives.
+
+\textbf{Zero-shot Russian works} better than I expected.
+All models get AUC-ROC above 0.78, meaning the models rank positive and negative examples reasonably well even across scripts.
+The AUC-ROC is much higher than the macro-F1, which suggests the model is learning useful patterns but the default 0.5 threshold isn't optimal. Tuning it could improve F1.
+EN-only edges out the multilingual model, probably because the small German data adds more noise than signal.
+
+\textbf{Translation hurts more than it helps}.
+The translated model has highest recall (0.522) but lowest precision (0.357).
+The noisy translations make it overpredict ADEs. The model seems to pick up on translation artifacts rather than actual ADE patterns.
+With only 500 training samples, it also can't match the variety of the full English training set.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{confusion_matrices_ru.png}
+\caption{Confusion matrices on Russian. Main problem: too many false negatives across all models.}
+\label{fig:cm-ru}
+\end{figure*}
+
+Figure~\ref{fig:cm-ru} shows confusion matrices for Russian.
+The main error pattern across all three models is false negatives, i.e.\ missed ADEs.
+The EN-only and multilingual models are conservative: they get decent precision but miss many true positives.
+The translated model flips this: it catches more ADEs but also flags many non-ADE posts as positive.
+
+Looking at the false negatives more closely, many of them are posts where the adverse effect is described indirectly or uses informal language.
+The models trained on English tweets and German forum posts struggle with colloquial Russian expressions for symptoms.
+False positives tend to be posts that mention drugs and negative experiences but not actual side effects, like complaints about drug prices or availability.
+
+
+%% ============================================================
+\section{Task 2: Classical ML vs.\ LLMs on Iris}
+\label{sec:task2}
+
+\subsection{Random Forest Baseline (Task 2.1)}
+\label{sec:task2-rf}
+
+I use the Iris dataset~\cite{fisher1936iris} with a 60/20/20 stratified split (90/30/30 samples).
+A Random Forest with 100 trees and max depth 5~\cite{breiman2001rf} gets 93.3\% accuracy and macro-F1 on test.
+I also set \texttt{class\_weight="balanced"} for consistency with the Task~1 approach, though it doesn't matter much here since Iris has perfectly balanced classes.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{rf_feature_importance.png}
+\caption{Feature importance. Petal measurements dominate, as expected.}
+\label{fig:rf-importance}
+\end{figure}
+
+Figure~\ref{fig:rf-importance} shows feature importances.
+Petal length and width are by far the most useful, together accounting for over 80\% of the total importance.
+The decision rules are simple: petal length $<$ 2.5 separates setosa from the other two, petal width around 1.75 separates versicolor from virginica.
+Sepal measurements contribute relatively little.
+This is consistent with the well-known structure of the dataset: setosa is linearly separable, while versicolor and virginica overlap slightly.
+
+The two misclassified test samples are both from the versicolor--virginica boundary.
+Their petal measurements fall right in the overlap region where even human experts would have trouble.
+93.3\% is essentially the ceiling for this particular split.
+
+\subsection{Textification and DistilBERT (Task 2.2)}
+\label{sec:task2-text}
+
+The idea here is to check whether a transformer can learn to classify structured data if we first convert it to text.
+I convert each sample in two ways:
+\begin{enumerate}
+\item \textbf{Natural language}: ``This flower has a sepal length of 5.1\,cm, a sepal width of 3.5\,cm, a petal length of 1.4\,cm, and a petal width of 0.2\,cm.''
+\item \textbf{Structured}: \texttt{sepal\_length=5.1 | sepal\_width=3.5 | petal\_length=1.4 | petal\_width=0.2}
+\end{enumerate}
+
+Then I fine-tune DistilBERT~\cite{sanh2019distilbert} for 20 epochs (batch size 8, lr $3\times10^{-5}$, max length 64).
+The structured format matches the RF exactly at 93.3\%.
+Natural language gets 90.0\%.
+
+The structured format works better because it's more compact and consistent.
+Every sample follows the same pattern: \texttt{feature=value | feature=value | ...}.
+The model can focus on the numbers right after each feature name without getting distracted by filler words.
+The natural language version has extra words (``has a'', ``of'', ``centimeters'') that the model needs to learn to ignore, and with only 90 training samples that's harder to do.
+
+So transformers can learn from textified numbers, but they don't beat the RF baseline.
+With 20 epochs on 90 samples, the model is probably overfitting to the training set.
+The fact that it still matches the RF on structured data shows that the text representation isn't the bottleneck; the limited training size is.
+
+\subsection{LLM Few-Shot and Hybrid (Task 2.3)}
+\label{sec:task2-llm}
+
+I use Flan-T5-large~\cite{chung2022flan} with 2 examples per class (6 examples total in the prompt).
+I pick examples closest to each class centroid, so the model sees the most typical representative of each species.
+Two setups:
+\begin{itemize}
+\item \textbf{Basic few-shot}: natural language feature descriptions plus examples.
+The prompt asks the model to classify and respond with one word.
+\item \textbf{Augmented}: same few-shot examples, but I also feed in the RF's prediction with confidence score and simplified decision rules (e.g., ``petal\_length$<$2.5 $\to$ setosa'').
+The idea was that the LLM could use the RF output as a strong hint.
+\end{itemize}
+
+Basic few-shot gets only 43.3\% accuracy (macro-F1 = 0.349), and the augmented version drops to 33.3\% (macro-F1 = 0.167).
+The LLM just can't do the precise numerical comparisons that Iris needs.
+It understands the general concept of flower classification, but deciding whether 1.7 is above or below 1.75 requires exact arithmetic, which is not what language models are built for.
+
+The augmented version does even worse, which I didn't expect.
+I think the extra information in the prompt (decision rules, confidence scores, RF predictions) ends up confusing the model more than helping it.
+A simpler prompt with just the raw features seems to work better.
+
+\subsection{Comparison (Task 2.4)}
+\label{sec:task2-compare}
+
+\begin{table}[t]
+\centering
+\caption{All Task~2 results on the Iris test set (30 samples).}
+\label{tab:task2-results}
+\small
+\begin{tabular}{lcc}
+\toprule
+\textbf{Approach} & \textbf{Accuracy} & \textbf{Macro-F1} \\
+\midrule
+Random Forest           & 0.933 & 0.933 \\
+DistilBERT (NL)         & 0.900 & 0.900 \\
+DistilBERT (Structured) & 0.933 & 0.933 \\
+LLM Few-shot            & 0.433 & 0.349 \\
+LLM Augmented           & 0.333 & 0.167 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{task2_comparison.png}
+\caption{All five approaches. RF and fine-tuned DistilBERT work; LLM few-shot doesn't.}
+\label{fig:task2-compare}
+\end{figure}
+
+Table~\ref{tab:task2-results} and Figure~\ref{fig:task2-compare} show the results.
+Random Forest is the best or tied-best, and DistilBERT with structured text matches it exactly. So fine-tuning on textified data actually works when the format is consistent.
+The LLM approaches fail badly.
+Iris classification needs exact thresholds (``is petal width above 1.75?''), and that's just not what language models are built for.
+
+Also, there's a practical side worth mentioning: the RF trains in under a second, DistilBERT takes several minutes, and Flan-T5 inference takes longer still.
+For small, clean tabular data, classical ML wins by a large margin and is also the simplest option.
+In terms of interpretability, RF is the clear winner: feature importances and decision rules are directly readable.
+DistilBERT is a black box, though its predictions are consistent.
+The LLM is the least reliable: its outputs vary and it sometimes predicts classes not in the label set.
+Honestly, Iris is probably too easy and too clean for this kind of comparison. It would be more interesting to try a messier, higher-dimensional dataset where the decision boundaries aren't so obvious.
+
+
+%% ============================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+\textbf{Task~1}: XLM-RoBERTa enables cross-lingual ADE detection even across the Latin--Cyrillic barrier.
+The English-only model got the best zero-shot Russian performance (macro-F1 = 0.700).
+I expected the translation approach to help more than it did --- but 500 translated samples just can't match 15k English ones, and translation noise makes things worse.
+The biggest limitation was the tiny German dataset: 60 positive samples is not enough for a transformer.
+With more balanced German data, the multilingual model would likely improve on Russian too.
+
+\textbf{Task~2}: Random Forest (93.3\%) beats everything on Iris.
+Fine-tuned DistilBERT can match it with structured text input, but few-shot Flan-T5 fails at numerical reasoning.
+For tabular data, classical ML is the way to go.
+Language models are designed for language, not for numerical comparisons. Converting numbers to text and hoping the model can do arithmetic doesn't work.
+
+\textbf{Limitations and future work}: For Task~1, the most obvious improvement would be a larger, more balanced German corpus.
+A higher max token length (256 or 512) could also help for the longer German forum posts that get truncated at 128.
+For the translation experiment, translating the full English training set instead of just 500 samples might change the picture, especially with a medical-domain translation model instead of Google Translate.
+For Task~2, testing with a harder tabular dataset (more features, more classes, noisier data) would give a clearer picture of where the break-even point between classical ML and transformers lies.
+
+\bibliography{refs}
+
+\end{document}

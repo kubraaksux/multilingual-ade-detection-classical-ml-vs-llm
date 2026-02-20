@@ -1,0 +1,11 @@
+Language,Split,Total,Positive (1),Negative (0),Pos %
+DE,train,1259,71,1188,5.6
+DE,val,223,12,211,5.4
+DE,test,634,35,599,5.5
+EN,train,14558,1018,13540,7.0
+EN,val,2570,180,2390,7.0
+EN,test,888,61,827,6.9
+RU,train,0,0,0,–
+RU,val,0,0,0,–
+RU,test,2669,272,2397,10.2
+RU (translated EN),train,500,100,400,20.0

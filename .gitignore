@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+.DS_Store
+*.pyc
+
+# Large model files (too big for GitHub)
+outputs/models/
+
+# Raw source data (can be re-downloaded)
+data/raw/
