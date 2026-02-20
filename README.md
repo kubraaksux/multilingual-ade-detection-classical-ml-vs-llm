@@ -5,7 +5,7 @@
 ```
 task1_multilingual.py     # Task 1: Multilingual ADE detection (XLM-RoBERTa, DE/EN/RU)
 task2_classical_vs_llm.py # Task 2: Classical ML vs LLM on Iris (RF, DistilBERT, Flan-T5)
-data/raw/                 # SMM4H 2026 Task 1 dataset (not in repo)
+data/raw/                 # SMM4H 2026 Task 1 dataset
 data/processed/           # Translated datasets (EN->DE, EN->FR, EN->RU)
 outputs/models/           # Trained model checkpoints (XLM-RoBERTa-base)
 outputs/figures/          # Generated plots
